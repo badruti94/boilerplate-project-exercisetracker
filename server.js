@@ -1,103 +1,138 @@
-const express = require('express')
-const app = express()
-const cors = require('cors')
-const mongoose = require('mongoose')
-const bodyParser = require('body-parser')
-require('dotenv').config()
+const express = require("express");
+const app = express();
+const bodyParser = require("body-parser");
+const cors = require("cors");
+const mongoose = require("mongoose");
+const validator = require("validator");
 
-app.use(cors())
-app.use(express.static('public'))
-app.use(bodyParser.urlencoded({
-  extended: false
-}))
+mongoose.connect(
+  process.env.MONGO_URI,
+  { useNewUrlParser: true, useUnifiedTopology: true, useFindAndModify: false },
+  err => {
+    err ? console.log(err) : console.log("connected to db!");
+  }
+);
 
-mongoose.connect(process.env.MONGO_URI, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true
-})
+app.use(cors());
+app.use(bodyParser.urlencoded({ extended: false }));
+app.use(bodyParser.json());
+app.use(express.static("public"));
 
-const Schema = mongoose.Schema
-const exerciseScheme = new Schema({
-  username: {
-    type: String,
-    required: true
+// Set up user schema
+const userSchema = new mongoose.Schema(
+  {
+    username: { type: String, required: true, unique: true },
+    exercises: [
+      {
+        description: { type: String, required: true },
+        duration: { type: Number, required: true },
+        date: { type: String }
+      }
+    ]
   },
-  log: [{
-    description: String,
-    duration: Number,
-    date: Date
-  }]
-})
+  { collection: "users" }
+);
 
-const Exercise = mongoose.model('Exercise', exerciseScheme)
+let User = mongoose.model("User", userSchema);
 
-app.get('/', (req, res) => {
-  res.sendFile(__dirname + '/views/index.html')
+// Routes
+app.get("/", (req, res) => {
+  res.sendFile(__dirname + "/views/index.html");
 });
 
-app.get('/tes', (req, res) => {
-  res.end(req.query.id)
-})
+// Return all users as array
+app.get("/api/exercise/users", async (req, res) => {
+  try {
+    let users = await User.find({});
+    let userData = users.map(user => {
+      return {
+        username: user.username,
+        id: user._id
+      };
+    });
+    res.json(userData);
+  } catch (err) {
+    console.log(err);
+  }
+});
 
-app.post('/api/exercise/new-user', (req, res) => {
-  Exercise({
-    username: req.body.username
-  }).save((err, data) => {
-    if (err) return console.error(err);
-    const {
-      _id,
-      username
-    } = data
-
+// Post new user to db and return json
+app.post("/api/exercise/new-user", async (req, res) => {
+  try {
+    let user = await User.create({
+      username: req.body.username,
+      exercises: []
+    });
+    res.json({ username: user.username, id: user._id });
+  } catch (err) {
+    console.log(err);
     res.json({
-      username,
-      _id
-    })
-  })
-})
+      status: 500,
+      mongoDbErrMessage: err.errmsg,
+      message: "User could not be created."
+    });
+  }
+});
 
-app.post('/api/exercise/add', (req, res) => {
-  Exercise.findById(req.body.userId, (err, exercise) => {
-    if (err) console.error(err);
-
-    let date = req.body.date
-    if (date === "") {
-      const today = new Date()
-      date = `${today.getFullYear()}-${today.getMonth()}-${today.getDate()}`
+// Post exercise to user in collection
+app.post("/api/exercise/add", async (req, res) => {
+  if (!req.body.userId || !req.body.description || !req.body.duration) {
+    res.json({
+      status: 400,
+      message:
+        "User ID, description, and duration are all required to add this exercise."
+    });
+    return;
+  }
+  if (isNaN(Number(req.body.duration))) {
+    res.json({ status: 400, message: "Exercise duration must be a number." });
+    return;
+  }
+  if (req.body.date !== "" && !validator.isISO8601(req.body.date)) {
+    res.json({
+      status: 400,
+      message: "Date provided must use correct yyyy-mm-dd format."
+    });
+    return;
+  }
+  try {
+    // Find user in collection
+    let user = await User.findOne({ _id: req.body.userId });
+    if (user) {
+      try {
+        const date = new Date();
+        const currentDate = `${date.getFullYear()}-${date.getMonth() +
+          1}-${date.getDate()}`;
+        const exercise = {
+          description: req.body.description,
+          duration: req.body.duration,
+          date: req.body.date ? req.body.date : currentDate
+        };
+        // Add exercise to user document and return updated user
+        let updatedUser = await User.findOneAndUpdate(
+          { _id: req.body.userId },
+          { $push: { exercises: exercise } },
+          { new: true }
+        );
+      } catch (err) {
+        console.log(err);
+        res.json({ status: 500, message: "This user was not updated." });
+      }
+    } else {
+      res.json({
+        status: 400,
+        message: "There are no users that match that id."
+      });
     }
-
-    console.log(date);
-    exercise.log.push({
-      description: req.body.description,
-      duration: req.body.duration,
-      date: date
-    })
-
-    exercise.save((err, updateExercise) => {
-      if (err) return console.error(err);
-      const {
-        username
-      } = updateExercise
-
-      res.json({
-        _id: req.body.userId,
-        username: username,
-        date: new Date(date).toDateString(),
-        duration: parseInt(req.body.duration),
-        description: req.body.description,
-      })
-    })
-  })
-})
-
-app.get('/api/exercise/users', (req, res) => {
-  Exercise.find({}).select('_id username')
-    .exec((err, users) => {
-      res.json({
-        users: users
-      })
-    })
-})
+  } catch (err) {
+    console.log(err);
+    res.json({
+      status: 500,
+      mongoDbErrMessage: err.errmsg,
+      message: "Exercise could not be added."
+    });
+  }
+});
 
 // Get full user  with exercise log & add total exercise count
 app.get("/api/exercise/log/:userId", async (req, res) => {
@@ -119,22 +154,17 @@ app.get("/api/exercise/log/:userId", async (req, res) => {
       return;
     }
     if (req.query.limit && isNaN(Number(req.query.limit))) {
-      res.json({
-        status: 400,
-        message: "Exercise limit must be a number."
-      });
+      res.json({ status: 400, message: "Exercise limit must be a number." });
       return;
     }
     try {
-      let user = await User.findOne({
-        _id: req.params.userId
-      });
-
+      let user = await User.findOne({ _id: req.params.userId });
+      
       // https://stackoverflow.com/questions/15993640/mongodb-subdocument-query-to-limit-elements
       // https://stackoverflow.com/questions/44721309/how-to-reverse-an-unwind-aggregation
-
+      
       let queryArray = [];
-
+      
       // Model for array to send into Aggregate
       // const array = [
       //     { $unwind: "$exercises" },
@@ -148,55 +178,28 @@ app.get("/api/exercise/log/:userId", async (req, res) => {
       //       }
       //     }
       //   ];
-
+      
       // Selectively build array to send into Aggregate request
-
-      queryArray.push({
-        $unwind: "$exercises"
-      });
+      
+      queryArray.push({ $unwind: "$exercises" });
       if (req.query.from) {
-        queryArray.push({
-          $match: {
-            "exercises.date": {
-              $gte: req.query.from
-            }
-          }
-        });
+        queryArray.push({ $match: { "exercises.date": { $gte: req.query.from } } });
       }
       if (req.query.to) {
-        queryArray.push({
-          $match: {
-            "exercises.date": {
-              $lte: req.query.to
-            }
-          }
-        });
+        queryArray.push({ $match: { "exercises.date": { $lte: req.query.to } } });
       }
       if (req.query.limit) {
-        queryArray.push({
-          $limit: Number(req.query.limit)
-        })
+        queryArray.push({ $limit: Number(req.query.limit) })
       }
-      queryArray.push({
-        $sort: {
-          "exercises.date": -1
-        }
-      });
-      queryArray.push({
-        $group: {
-          _id: "$_id",
-          exercises: {
-            $push: "$exercises"
-          }
-        }
-      });
-
+      queryArray.push({ $sort: { "exercises.date": -1 } });
+      queryArray.push({ $group: { _id: "$_id", exercises: { $push: "$exercises" } } });
+      
       console.log("builtArray", queryArray);
       // console.log("array", array);
-
+      
       User.aggregate(
         queryArray,
-        function (err, data) {
+        function(err, data) {
           console.log("data", data[0]);
           if (data[0].exercises.length > 0) {
             res.json({
@@ -216,15 +219,11 @@ app.get("/api/exercise/log/:userId", async (req, res) => {
             });
           }
         }
-      );
+      );      
     } catch (err) {
       console.log(err);
       if (err.name === "CastError") {
-        res.json({
-          status: 400,
-          dbMessage: err.message,
-          userMessage: "There are no users matching the given user id."
-        });
+        res.json({ status: 400, dbMessage: err.message, userMessage: "There are no users matching the given user id." });
       } else {
         res.json({
           status: 500,
@@ -235,20 +234,12 @@ app.get("/api/exercise/log/:userId", async (req, res) => {
   } else {
     // return full user exercise log
     try {
-      let user = await User.findOne({
-        _id: req.params.userId
-      });
-      res.json({
-        user: user,
-        totalExerciseCount: user.exercises.length
-      });
+      let user = await User.findOne({ _id: req.params.userId });
+      res.json({ user: user, totalExerciseCount: user.exercises.length });
     } catch (err) {
       console.log(err);
       if (err.name === "CastError") {
-        res.json({
-          status: 400,
-          message: err.message
-        });
+        res.json({ status: 400, message: err.message });
       } else {
         res.json({
           status: 500,
@@ -260,9 +251,32 @@ app.get("/api/exercise/log/:userId", async (req, res) => {
   return;
 });
 
+// Not found middleware
+app.use((req, res, next) => {
+  return next({ status: 404, message: "not found" });
+});
 
+// Error Handling middleware
+app.use((err, req, res, next) => {
+  let errCode, errMessage;
 
+  if (err.errors) {
+    // mongoose validation error
+    errCode = 400; // bad request
+    const keys = Object.keys(err.errors);
+    // report the first validation error
+    errMessage = err.errors[keys[0]].message;
+  } else {
+    // generic or custom error
+    errCode = err.status || 500;
+    errMessage = err.message || "Internal Server Error";
+  }
+  res
+    .status(errCode)
+    .type("txt")
+    .send(errMessage);
+});
 
 const listener = app.listen(process.env.PORT || 3000, () => {
-  console.log('Your app is listening on port ' + listener.address().port)
-})
+  console.log("Your app is listening on port " + listener.address().port);
+});
